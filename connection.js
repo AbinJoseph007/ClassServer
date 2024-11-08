@@ -1,176 +1,86 @@
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
+const fetch = require('node-fetch');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-
+// Environment variables
 const airtableApiKey = process.env.AIRTABLE_API_KEY;
 const airtableBaseId = process.env.AIRTABLE_BASE_ID;
+const airtableClassTableName = 'Biaw Classes';
+const airtableInstructorTableName = 'Instructors';
+const airtablePaymentTableName = 'Payment Records';
+const airtableMulticlassTableName = 'Multiple Class Registration';
 const webflowApiKey = process.env.WEBFLOW_API_KEY;
 const webflowCollectionId = process.env.WEBFLOW_COLLECTION_ID;
 
-app.use(cors());
-app.use(express.json());
+// Helper function to fetch data from Airtable
+async function getAirtableRecords(tableName) {
+    const url = `https://api.airtable.com/v0/${airtableBaseId}/${encodeURIComponent(tableName)}`;
+    console.log('Fetching records from:', url);
 
-/** Helper Functions **/
+    try {
+        const response = await fetch(url, {
+            headers: {
+                Authorization: `Bearer ${airtableApiKey}`,
+                'accept-version': '1.0.0', // Verify the correct version
+            },
+        });
 
-const fetchAirtableRecords = async (tableName) => {
-  const url = `https://api.airtable.com/v0/${airtableBaseId}/${tableName}`;
-  const headers = { Authorization: `Bearer ${airtableApiKey}` };
-  const response = await axios.get(url, { headers });
-  return response.data.records;
-};
+        if (!response.ok) {
+            const error = await response.json();
+            console.error(`Failed to fetch ${tableName} records:`, response.status, response.statusText, error);
+            return [];
+        }
 
-const slugify = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-
-const fetchWebflowRecords = async () => {
-  const url = `https://api.webflow.com/collections/${webflowCollectionId}/items`;
-  const headers = {
-    Authorization: `Bearer ${webflowApiKey}`,
-    'accept-version': '1.0.0',
-  };
-  const response = await axios.get(url, { headers });
-  return response.data.items;
-};
-
-/** Routes **/
-
-// Fetch Airtable records
-app.get('/airtable/:table', async (req, res) => {
-  const { table } = req.params;
-  try {
-    const records = await fetchAirtableRecords(table);
-    res.json(records);
-  } catch (error) {
-    console.error(`Error fetching Airtable records from ${table}:`, error);
-    res.status(500).json({ error: `Failed to fetch records from ${table}` });
-  }
-});
-
-// Fetch Webflow records
-app.get('/webflow/records', async (req, res) => {
-  try {
-    const records = await fetchWebflowRecords();
-    res.json(records);
-  } catch (error) {
-    console.error('Error fetching Webflow records:', error);
-    res.status(500).json({ error: 'Failed to fetch Webflow records' });
-  }
-});
-
-// Sync Airtable to Webflow
-app.post('/sync', async (req, res) => {
-  try {
-    const classRecords = await fetchAirtableRecords('Biaw Classes');
-    const instructorRecords = await fetchAirtableRecords('Instructors');
-    const webflowRecords = await fetchWebflowRecords();
-
-    const webflowItemMap = webflowRecords.reduce((map, item) => {
-      if (item.fieldData.airtablerecordid) {
-        map[item.fieldData.airtablerecordid] = item;
-      }
-      return map;
-    }, {});
-
-    const airtableRecordIds = new Set(classRecords.map((record) => record.id));
-    
-    for (const webflowItem of webflowRecords) {
-      const airtablerecordid = webflowItem.fieldData?.airtablerecordid;
-      if (airtablerecordid && !airtableRecordIds.has(airtablerecordid)) {
-        console.log(`Deleting Webflow item with ID ${webflowItem.id}`);
-        await deleteWebflowItem(webflowItem.id);
-      }
+        const data = await response.json();
+        console.log(`Received ${tableName} records:`, data.records);
+        return data.records;
+    } catch (error) {
+        console.error(`Error fetching ${tableName} records:`, error);
+        return [];
     }
+}
 
-    for (const classRecord of classRecords) {
-      const airtableFields = {
-        Name: classRecord.fields.Name || '',
-        Description: classRecord.fields.Description || '',
-        Date: classRecord.fields.Date || '',
-        'end-time': classRecord.fields['End Time'] || '',
-        'number-of-seats': String(classRecord.fields['Number of seats'] || '0'),
-        'price-member': String(classRecord.fields['Price - Member'] || '0'),
-        AirtableRecordId: classRecord.id || '',
-        slug: slugify(classRecord.fields.Name || ''),
-      };
-
-      const existingWebflowItem = webflowItemMap[airtableFields.AirtableRecordId];
-
-      if (existingWebflowItem) {
-        const webflowId = existingWebflowItem.id;
-        console.log(`Updating existing Webflow item: ${airtableFields.Name}`);
-        await updateWebflowItem(webflowCollectionId, webflowId, airtableFields);
-      } else {
-        console.log(`Adding new Webflow item: ${airtableFields.Name}`);
-        await addWebflowItem(airtableFields);
-      }
-    }
-
-    res.json({ message: 'Sync completed successfully' });
-  } catch (error) {
-    console.error('Error during sync:', error);
-    res.status(500).json({ error: 'Sync failed' });
-  }
-});
-
-/** Update, Delete, and Add Functions **/
-
-const updateWebflowItem = async (collectionId, webflowId, fieldsToUpdate) => {
-  const url = `https://api.webflow.com/collections/${collectionId}/items/${webflowId}`;
-  try {
-    const response = await axios.patch(url, { fields: fieldsToUpdate }, {
-      headers: {
-        Authorization: `Bearer ${webflowApiKey}`,
-        'Content-Type': 'application/json',
-        'accept-version': '1.0.0',
-      },
-    });
-    console.log(`Updated Webflow item ${webflowId}`);
-    return response.data;
-  } catch (error) {
-    console.error('Error updating Webflow item:', error.message);
-  }
-};
-
-const deleteWebflowItem = async (webflowId) => {
-  const url = `https://api.webflow.com/collections/${webflowCollectionId}/items/${webflowId}`;
-  try {
-    await axios.delete(url, {
-      headers: {
-        Authorization: `Bearer ${webflowApiKey}`,
-        'accept-version': '1.0.0',
-      },
-    });
-    console.log(`Deleted Webflow item ${webflowId}`);
-  } catch (error) {
-    console.error('Error deleting Webflow item:', error.message);
-  }
-};
-
-const addWebflowItem = async (fields) => {
+// Fetch records from Webflow
+async function getWebflowRecords() {
   const url = `https://api.webflow.com/collections/${webflowCollectionId}/items`;
-  try {
-    const payload = {
-      fields: fields,
-      'slug': fields.slug || slugify(fields.Name),
-    };
-    const response = await axios.post(url, payload, {
-      headers: {
-        Authorization: `Bearer ${webflowApiKey}`,
-        'Content-Type': 'application/json',
-        'accept-version': '1.0.0',
-      },
-    });
-    console.log(`Added new Webflow item: ${fields.Name}`);
-    return response.data;
-  } catch (error) {
-    console.error('Error adding Webflow item:', error.message);
-  }
-};
+  console.log('Fetching Webflow records from:', url);
 
-/** Start Server **/
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+  try {
+      const response = await fetch(url, {
+          headers: {
+              Authorization: `Bearer ${webflowApiKey}`,
+              'accept-version': '1.0.0',
+          },
+      });
+
+      if (!response.ok) {
+          // Log the status code and reason for better debugging
+          console.error('Failed to fetch Webflow records:', response.status, response.statusText);
+
+          // Log response body to find detailed error message
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+              const errorJson = await response.json();
+              console.error('Error details (JSON):', errorJson);
+          } else {
+              const errorText = await response.text();
+              console.error('Error details (Text):', errorText);
+          }
+
+          return [];
+      }
+
+      const data = await response.json();
+      console.log('Received Webflow records:', data.items);
+      return data.items;
+  } catch (error) {
+      // Log any network or unexpected errors
+      console.error('Error fetching Webflow records:', error);
+      return [];
+  }
+}
+
+// Call functions as needed, for example:
+(async () => {
+    await getAirtableRecords(airtableClassTableName);
+    await getWebflowRecords();
+})();
